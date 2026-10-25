@@ -1,0 +1,45 @@
+@baseUrl = http://localhost:8080
+# Register a subscriber using subscribers.http, then set its returned id here.
+@subscriberId = 1
+# Replace this with the id returned by the create-subscription request.
+@subscriptionId = 1
+@eventType = ride.completed
+
+### Subscribe a service to an event type
+POST {{baseUrl}}/subscriptions
+Content-Type: application/json
+
+{
+  "subscriber_id": {{subscriberId}},
+  "event_type": "{{eventType}}",
+  "enabled": true
+}
+
+### List subscriptions
+GET {{baseUrl}}/subscriptions?limit=100&offset=0
+
+### Get a subscription
+GET {{baseUrl}}/subscriptions/{{subscriptionId}}
+
+### Update a subscription (PUT requires subscriber_id and event_type)
+PUT {{baseUrl}}/subscriptions/{{subscriptionId}}
+Content-Type: application/json
+
+{
+  "subscriber_id": {{subscriberId}},
+  "event_type": "{{eventType}}",
+  "enabled": true
+}
+
+### Disable a subscription
+PUT {{baseUrl}}/subscriptions/{{subscriptionId}}
+Content-Type: application/json
+
+{
+  "subscriber_id": {{subscriberId}},
+  "event_type": "{{eventType}}",
+  "enabled": false
+}
+
+### Unsubscribe
+DELETE {{baseUrl}}/subscriptions/{{subscriptionId}}

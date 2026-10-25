@@ -1,0 +1,18 @@
+@baseUrl = http://localhost:8080
+@eventType = ride.completed
+# Use a new key for each new logical event.
+@idempotenceKey = ride-completed-001
+
+### Check API readiness
+GET {{baseUrl}}/readyz
+
+### Publish an event
+# Payload is a JSON-encoded string, matching the current Event struct.
+POST {{baseUrl}}/
+Content-Type: application/json
+
+{
+  "Type": "{{eventType}}",
+  "IdempotenceKey": "{{idempotenceKey}}",
+  "Payload": "{\"ride_id\":\"ride_123\",\"amount\":250,\"currency\":\"INR\"}"
+}
