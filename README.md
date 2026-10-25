@@ -34,6 +34,11 @@ expose these fields when needed. The outbox currently stores a copy of the event
 fields, matching the existing model. Idempotency enforcement is not part of this
 schema yet.
 
+Migration 2 adds outbox retry metadata: `attempt_count`, `last_attempt_at`,
+`last_error` and `next_attempt_at`. Existing rows start with zero attempts and
+become immediately eligible for polling. Failed state `3` is also supported.
+Rolling migration 2 back requires resolving any state `3` records first.
+
 Apply pending migrations independently, including on an existing database:
 
 ```sh
@@ -62,7 +67,25 @@ For host execution with `go run ./cmd/api`, export `DATABASE_URL` using
 `localhost:5432` instead of `postgres:5432`, plus `PGUSER` and `PGPASSWORD` if
 credentials are omitted from the URL. Go does not automatically load `.env`.
 
-## Verify migrations
+## Outbox polling worker
+
+```sh
+docker compose up --build relay-worker
+```
+
+The worker opens PostgreSQL once, polls immediately, then checks every 500 ms.
+Set `OUTBOX_POLL_INTERVAL` (for example, `2s`) in `.env` to change the interval
+under Compose. Each query has a five-second timeout and fetches at most 100
+pending records whose `next_attempt_at` has arrived, ordered by that timestamp
+and then row ID. Query errors are logged and polling continues. Shutdown signals
+cancel the query and close the database connection pool.
+
+This stage only fetches records and logs their IDs. Rows remain pending, so
+successive polls can return the same rows. It does not claim rows, increment
+attempts or publish to Kafka yet. Record ownership and processing will be added
+together with Kafka dispatch.
+
+## Verify migrations and polling
 
 ```sh
 go test ./...
@@ -72,9 +95,10 @@ For the database integration test, export `TEST_DATABASE_URL` pointing to a
 dedicated PostgreSQL test database, then run:
 
 ```sh
-go test -race ./internal/ingestion -v
+go test -race ./internal/dispatcher -v
 ```
 
-The test uses its own temporary schema. It checks migration up/down, GORM field
-mapping, pending outbox insertion and rollback of the event when the outbox
-insert fails. Without `TEST_DATABASE_URL`, the database test is skipped.
+The test uses its own temporary schema. It checks migration upgrade/rollback,
+preservation of existing rows, GORM defaults, due-record filtering, batch limits,
+ordering and cancellation. Without `TEST_DATABASE_URL`, the database test is
+skipped.

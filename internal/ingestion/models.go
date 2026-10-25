@@ -1,6 +1,10 @@
 package ingestion
 
-import "relay/internal/types"
+import (
+	"time"
+
+	"relay/internal/types"
+)
 
 type EventModel struct {
 	types.Event
@@ -12,9 +16,16 @@ const (
 	StatusUnknown Status = iota
 	StatusPending
 	StatusPublished
+	StatusFailed
 )
 
 type OutboxRecordModel struct {
 	EventModel
-	State Status
+	ID            int64     `gorm:"primaryKey;autoIncrement"`
+	CreatedAt     time.Time `gorm:"default:CURRENT_TIMESTAMP"`
+	State         Status
+	AttemptCount  int
+	LastAttemptAt *time.Time
+	LastError     *string
+	NextAttemptAt time.Time `gorm:"default:CURRENT_TIMESTAMP"`
 }

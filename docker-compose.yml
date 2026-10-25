@@ -55,6 +55,7 @@ services:
     command: ["/app/worker"]
     environment:
       <<: *app-environment
+      OUTBOX_POLL_INTERVAL: ${OUTBOX_POLL_INTERVAL:-500ms}
     depends_on:
       postgres:
         condition: service_healthy
