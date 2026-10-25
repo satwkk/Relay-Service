@@ -33,8 +33,18 @@ func run(ctx context.Context) error {
 			return fmt.Errorf("OUTBOX_POLL_INTERVAL must be a positive duration, for example 500ms")
 		}
 	}
+	produceTimeout := 10 * time.Second
+	if value := os.Getenv("KAFKA_PRODUCE_TIMEOUT"); value != "" {
+		var err error
+		produceTimeout, err = time.ParseDuration(value)
+		if err != nil || produceTimeout < time.Second {
+			return fmt.Errorf("KAFKA_PRODUCE_TIMEOUT must be a duration of at least 1s, for example 10s")
+		}
+	}
 	kfCli, err := kgo.NewClient(
 		kgo.SeedBrokers(os.Getenv("KAFKA_ADDR")),
+		kgo.RecordDeliveryTimeout(produceTimeout),
+		kgo.AllowIdempotentProduceCancellation(),
 	)
 	if err != nil {
 		return err
@@ -70,6 +80,7 @@ func run(ctx context.Context) error {
 					if err := service.RecordPermanentFailure(ctx, record); err != nil {
 						log.Printf("Failed to permanently fail the record %d: %v", record.ID, err)
 					}
+					continue
 				}
 				eventJson, err := json.Marshal(record)
 				if err != nil {
@@ -80,7 +91,9 @@ func run(ctx context.Context) error {
 					Topic: "relay.events",
 					Value: eventJson,
 				}
-				produceErr := kfCli.ProduceSync(ctx, kfRecord).FirstErr()
+				produceCtx, cancelProduce := context.WithTimeout(ctx, produceTimeout)
+				produceErr := kfCli.ProduceSync(produceCtx, kfRecord).FirstErr()
+				cancelProduce()
 				if produceErr != nil {
 					if err := service.RecordFailure(ctx, record, produceErr); err != nil {
 						log.Printf("Failed to record Kafka failure for outbox %d: %v", record.ID, err)
@@ -88,7 +101,7 @@ func run(ctx context.Context) error {
 					continue
 				}
 				if err := service.RecordSuccess(ctx, record); err != nil {
-					log.Printf("Successfully recorded Kafka success for outbox %d: %v", record.ID, err)
+					log.Printf("Failed to record Kafka success for outbox %d: %v", record.ID, err)
 				}
 			}
 			log.Printf("Fetched %d pending outbox records: ids=%v", len(records), ids)

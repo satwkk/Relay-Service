@@ -69,11 +69,7 @@ func (s *Service) RecordPermanentFailure(ctx context.Context, record ingestion.O
 		Model(&ingestion.OutboxRecordModel{}).
 		Where("ID = ? AND state = ?", record.ID, ingestion.StatusPending).
 		Updates(map[string]any{
-			"state":           ingestion.StatusFailed,
-			"attempt_count":   gorm.Expr("attempt_count + 1"),
-			"last_attempt_at": gorm.Expr("CURRENT_TIMESTAMP"),
-			"last_error":      "",
-			"next_attempt_at": gorm.Expr("CURRENT_TIMESTAMP + INTERVAL '5 seconds'"),
+			"state": ingestion.StatusFailed,
 		})
 	if result.Error != nil {
 		return fmt.Errorf("record failure for outbox %d: %w", record.ID, result.Error)

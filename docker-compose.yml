@@ -56,6 +56,7 @@ services:
     environment:
       <<: *app-environment
       OUTBOX_POLL_INTERVAL: ${OUTBOX_POLL_INTERVAL:-500ms}
+      KAFKA_PRODUCE_TIMEOUT: ${KAFKA_PRODUCE_TIMEOUT:-10s}
     depends_on:
       postgres:
         condition: service_healthy
