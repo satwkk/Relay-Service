@@ -66,6 +66,11 @@ func run(ctx context.Context) error {
 			ids := make([]int64, len(records))
 			for i, record := range records {
 				ids[i] = record.ID
+				if record.AttemptCount >= 5 {
+					if err := service.RecordPermanentFailure(ctx, record); err != nil {
+						log.Printf("Failed to permanently fail the record %d: %v", record.ID, err)
+					}
+				}
 				eventJson, err := json.Marshal(record)
 				if err != nil {
 					log.Printf("Json marshaling failed for event %d", record.ID)
