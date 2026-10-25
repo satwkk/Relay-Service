@@ -85,7 +85,72 @@ successive polls can return the same rows. It does not claim rows, increment
 attempts or publish to Kafka yet. Record ownership and processing will be added
 together with Kafka dispatch.
 
-## Verify migrations and polling
+## Subscriber and subscription APIs
+
+Subscribers register receiving services; subscriptions bind event types to those
+services. Migration 3 creates both tables. Rebuild and run `relay-migrate` before
+using these endpoints (or start the API with `docker compose up --build relay-api`).
+
+| Method | Path | Behavior |
+|---|---|---|
+| POST | `/subscribers` | Register a service and webhook URL |
+| GET | `/subscribers` | List subscribers |
+| GET | `/subscribers/:id` | Read a subscriber |
+| PUT | `/subscribers/:id` | Replace its editable fields |
+| DELETE | `/subscribers/:id` | Delete it and its subscriptions |
+| POST | `/subscriptions` | Bind an event type to a subscriber |
+| GET | `/subscriptions` | List subscriptions |
+| GET | `/subscriptions/:id` | Read a subscription |
+| PUT | `/subscriptions/:id` | Replace its editable fields |
+| DELETE | `/subscriptions/:id` | Remove a binding |
+
+Example request bodies:
+
+```json
+{"name":"payments","webhook_url":"http://payments/webhooks","enabled":true}
+```
+
+```json
+{"subscriber_id":1,"event_type":"ride.completed","enabled":true}
+```
+
+Both POST and PUT accept these bodies. PUT requires all editable fields except
+`enabled`, which defaults to `true` when omitted. Explicit `false` disables a
+subscriber or subscription. Webhook URLs must be absolute HTTP(S) URLs without
+credentials or fragments. Event types are exact, case-sensitive strings;
+surrounding whitespace is removed. Subscriber names are unique, and each
+`(subscriber_id, event_type)` binding is unique.
+
+Create returns `201`, reads/updates return `200`, and deletion returns an empty
+`204` response. Lists return JSON arrays in ID order and support `?limit=100&offset=0`
+(default limit 100, maximum 1000). Invalid input returns `400`, missing resources
+or referenced subscribers return `404`, and duplicates return `409`. Errors have
+the shape `{"error":"message"}`.
+
+The existing Go client exposes the same operations:
+
+```go
+subscriber, err := c.RegisterSubscriber(ctx, types.SubscriberRequest{
+    Name: "payments",
+    WebhookURL: "http://payments/webhooks",
+})
+if err != nil {
+    return err
+}
+_, err = c.Subscribe(ctx, types.SubscriptionRequest{
+    SubscriberID: subscriber.ID,
+    EventType: "ride.completed",
+})
+```
+
+Use `GetSubscriber`, `ListSubscribers`, `UpdateSubscriber`, `DeleteSubscriber`,
+`GetSubscription`, `ListSubscriptions`, `UpdateSubscription`, and `Unsubscribe`
+for the remaining operations. List methods take `types.ListOptions{}` for the
+default page. Non-success HTTP responses return `*client.APIError`, including
+the status code and server message. Registration persists configuration;
+fanout and webhook delivery are separate components.
+
+## Verify migrations and subscription CRUD
 
 ```sh
 go test ./...
@@ -95,10 +160,11 @@ For the database integration test, export `TEST_DATABASE_URL` pointing to a
 dedicated PostgreSQL test database, then run:
 
 ```sh
-go test -race ./internal/dispatcher -v
+go test -race ./internal/subscription -v
 ```
 
-The test uses its own temporary schema. It checks migration upgrade/rollback,
-preservation of existing rows, GORM defaults, due-record filtering, batch limits,
-ordering and cancellation. Without `TEST_DATABASE_URL`, the database test is
-skipped.
+The test uses its own temporary schema. It applies all migrations and exercises
+the client against the real HTTP handlers and PostgreSQL, including disabled
+flags, pagination, uniqueness, foreign keys, cascading deletes, cancellation,
+and migration 3 rollback/reapplication. Without `TEST_DATABASE_URL`, the database
+test is skipped; request-validation tests still run.

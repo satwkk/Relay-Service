@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"relay/internal/ingestion"
+	"relay/internal/subscription"
 	"relay/internal/types"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,13 @@ func main() {
 		log.Fatalf("Ingestion service initialization failed: %v", err)
 		return
 	}
+	subscriptionSvc, err := subscription.NewService(os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatalf("Subscription service initialization failed: %v", err)
+		return
+	}
+	defer subscriptionSvc.Close()
+	subscription.RegisterRoutes(router, subscriptionSvc)
 	if err := router.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start API server: %v", err)
 	}
