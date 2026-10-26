@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"relay/internal/types"
+	"relay/types"
 
 	"github.com/gin-gonic/gin"
 )

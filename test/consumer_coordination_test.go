@@ -298,7 +298,7 @@ func TestDeliveryRetriesWithoutKafka(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		if string(body) != `{"ride_id":"ride_123"}` || r.Header.Get("X-Relay-consumer.Delivery-ID") == "" {
+		if string(body) != `{"ride_id":"ride_123"}` || r.Header.Get("X-Relay-Delivery-ID") == "" {
 			t.Error("webhook lost its JSON payload or delivery identity")
 		}
 		if calls.Add(1) == 1 {

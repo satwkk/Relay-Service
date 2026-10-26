@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"relay/internal/types"
+	"relay/types"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"

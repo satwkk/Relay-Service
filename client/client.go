@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"relay/internal/types"
+	"relay/types"
 	"time"
 )
 

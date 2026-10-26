@@ -3,7 +3,7 @@ package ingestion
 import (
 	"time"
 
-	"relay/internal/types"
+	"relay/types"
 )
 
 type EventModel struct {

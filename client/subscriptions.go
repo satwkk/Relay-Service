@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"relay/internal/types"
+	"relay/types"
 )
 
 type APIError struct {

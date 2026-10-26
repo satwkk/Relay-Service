@@ -6,7 +6,7 @@ import (
 	"os"
 	"relay/internal/ingestion"
 	"relay/internal/subscription"
-	"relay/internal/types"
+	"relay/types"
 
 	"github.com/gin-gonic/gin"
 )

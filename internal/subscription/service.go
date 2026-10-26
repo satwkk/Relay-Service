@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"relay/internal/types"
+	"relay/types"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/driver/postgres"
