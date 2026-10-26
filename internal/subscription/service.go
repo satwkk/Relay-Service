@@ -189,3 +189,16 @@ func (s *Service) DeleteSubscription(ctx context.Context, id int64) error {
 	}
 	return nil
 }
+
+func (s *Service) FindTargetsByEventType(ctx context.Context, eventType string) ([]types.DeliveryTarget, error) {
+	targets := make([]types.DeliveryTarget, 0)
+	err := s.db.WithContext(ctx).
+		Table("subscriptions AS s").
+		Select("s.id AS subscription_id, sub.webhook_url").
+		Joins("JOIN subscribers AS sub on sub.id = s.subscriber_id").
+		Where(
+			"s.event_type = ? AND s.enabled = ? AND sub.enabled = ?",
+			eventType, true, true,
+		).Scan(&targets).Error
+	return targets, err
+}

@@ -38,3 +38,8 @@ type ListOptions struct {
 	Limit  int
 	Offset int
 }
+
+type DeliveryTarget struct {
+	SubscriptionID int64
+	HookURL        string `gorm:"column:webhook_url"`
+}
