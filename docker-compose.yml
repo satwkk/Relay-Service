@@ -68,6 +68,31 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  relay-consumer:
+    image: relay-app:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    command: ["/app/consumer"]
+    environment:
+      <<: *app-environment
+      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-relay-fanout}
+      DELIVERY_POLL_INTERVAL: ${DELIVERY_POLL_INTERVAL:-500ms}
+      WEBHOOK_TIMEOUT: ${WEBHOOK_TIMEOUT:-10s}
+      DELIVERY_LEASE_DURATION: ${DELIVERY_LEASE_DURATION:-30s}
+    deploy:
+      replicas: ${CONSUMER_REPLICAS:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      relay-migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    stop_grace_period: 20s
+    restart: unless-stopped
+
   relay-migrate:
     build:
       context: .
@@ -123,6 +148,9 @@ services:
   kafka:
     image: apache/kafka:4.1.2
     hostname: kafka
+    depends_on:
+      kafka-storage-init:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:9092:9092"
     environment:
@@ -152,6 +180,15 @@ services:
       retries: 20
       start_period: 30s
     restart: unless-stopped
+
+  kafka-storage-init:
+    image: apache/kafka:4.1.2
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["chown -R 1000:1000 /kafka-data"]
+    volumes:
+      - kafka-data:/kafka-data
+    restart: "no"
 
   kafka-init:
     image: apache/kafka:4.1.2

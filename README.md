@@ -4,7 +4,7 @@
 
 SQL migrations live in `migrations/` and run using the pinned
 `golang-migrate` Docker image. The `migrations` Dockerfile target packages those
-scripts; the `app` target builds the API and worker.
+scripts; the `app` target builds the API, outbox worker, and consumer.
 
 Set `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` in `.env` (the user and
 database default to `relay`). Keep existing credentials when using an existing
@@ -80,10 +80,75 @@ pending records whose `next_attempt_at` has arrived, ordered by that timestamp
 and then row ID. Query errors are logged and polling continues. Shutdown signals
 cancel the query and close the database connection pool.
 
-This stage only fetches records and logs their IDs. Rows remain pending, so
-successive polls can return the same rows. It does not claim rows, increment
-attempts or publish to Kafka yet. Record ownership and processing will be added
-together with Kafka dispatch.
+The outbox worker publishes these records to `relay.events`, then records success
+or a scheduled retry in PostgreSQL. `KAFKA_PRODUCE_TIMEOUT` defaults to `10s`.
+Keep one outbox dispatcher instance; the consumer service below is the component
+that supports multiple replicas.
+
+## Kafka consumers and webhook delivery
+
+Set `CONSUMER_REPLICAS=3` in `.env` to choose how many consumer containers run
+(default: three), then start the full pipeline:
+
+```sh
+docker compose up --build -d relay-api relay-worker relay-consumer
+```
+
+To change the count for one invocation:
+
+```sh
+CONSUMER_REPLICAS=5 docker compose up -d --no-deps relay-consumer
+```
+
+Each replica runs two independent loops. The Kafka loop joins the shared
+`relay-fanout` consumer group and creates delivery jobs. The database loop claims
+one due delivery at a time and sends its webhook, including while Kafka is idle
+or unavailable. Kafka assigns partitions across the group; with the current
+three-partition topic, at most three replicas consume Kafka records concurrently.
+All replicas can process PostgreSQL delivery jobs.
+
+The one-shot `kafka-storage-init` service gives Kafka's user ownership of its
+named volume before the broker starts, including on a fresh installation.
+
+Migration 4 creates delivery snapshots; migration 5 adds ownership and recovery.
+Fanout uses `INSERT ... SELECT` to create jobs for active subscriptions and
+subscribers in one transaction. The source outbox ID is carried in Kafka and
+stored as `deliveries.record_id`. A `consumer_fanouts` receipt is committed with
+the jobs, so replay cannot repeat a completed fanout or change its selected
+subscribers, including events with no subscribers. The unique
+`(record_id, subscription_id)` constraint provides an additional duplicate guard.
+Offsets are committed only after this transaction succeeds. Database or commit
+failures restart the Kafka session from committed offsets. Invalid messages are
+retained in `consumer_rejections` before their offsets are acknowledged.
+
+Delivery claims use `FOR UPDATE SKIP LOCKED`, a random claim token, and a lease.
+Attempts are counted when a job is claimed, including attempts interrupted by a
+crash. HTTP happens after the claim transaction finishes. Only the owner of an
+unexpired lease can record the result; abandoned claims are reclaimable. An
+expired final attempt becomes failed without sending beyond the attempt limit.
+
+HTTP `2xx` marks a job delivered; other responses and request errors schedule
+retries after 5, 10, 20, and 40 seconds, then mark the fifth failed attempt as
+failed. Each attempt carries the same `X-Relay-Delivery-ID`; receivers should
+deduplicate by this ID because a successful webhook followed by a crash or a
+database failure can be sent again. `X-Relay-Record-ID` and `X-Relay-Event-Type`
+identify the source event. Stored JSON payloads are sent directly as JSON;
+plain-text payloads are encoded as JSON strings. Redirects are not followed.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `CONSUMER_REPLICAS` | `3` | Consumer container count |
+| `KAFKA_CONSUMER_GROUP` | `relay-fanout` | Shared group for all replicas |
+| `DELIVERY_POLL_INTERVAL` | `500ms` | Wait when no jobs are due |
+| `WEBHOOK_TIMEOUT` | `10s` | HTTP attempt timeout |
+| `DELIVERY_LEASE_DURATION` | `30s` | Claim recovery deadline |
+
+The lease must exceed the HTTP timeout plus ten seconds for database operations.
+Graceful shutdown cancels both loops; unfinished deliveries recover after their
+leases expire. Stop consumers and resolve processing claims before rolling back
+migration 5. Outbox records, subscriptions, and subscribers referenced by delivery
+history must be retained until that history is explicitly removed. Changing the
+consumer group creates a separate consumption history.
 
 ## Subscriber and subscription APIs
 
@@ -150,7 +215,7 @@ default page. Non-success HTTP responses return `*client.APIError`, including
 the status code and server message. Registration persists configuration;
 fanout and webhook delivery are separate components.
 
-## Verify migrations and subscription CRUD
+## Verification
 
 ```sh
 go test ./...
@@ -160,11 +225,15 @@ For the database integration test, export `TEST_DATABASE_URL` pointing to a
 dedicated PostgreSQL test database, then run:
 
 ```sh
-go test -race ./internal/subscription -v
+go test -race ./test -v
 ```
 
-The test uses its own temporary schema. It applies all migrations and exercises
-the client against the real HTTP handlers and PostgreSQL, including disabled
-flags, pagination, uniqueness, foreign keys, cascading deletes, cancellation,
-and migration 3 rollback/reapplication. Without `TEST_DATABASE_URL`, the database
-test is skipped; request-validation tests still run.
+The tests use temporary schemas and check atomic fanout, concurrent duplicate
+events, frozen subscriber selection, concurrent claims, retry scheduling while
+Kafka is idle, stale-owner protection, lease recovery, attempt exhaustion, and
+migration 5 rollback/reapplication. The Kafka test additionally requires
+`TEST_KAFKA_ADDR` pointing to an isolated broker with a `relay.events` topic. It
+runs two consumers, injects a database failure, checks that offsets do not advance
+before persistence, then verifies recovery, duplicate suppression, webhook
+delivery, rejected-message retention, and committed offsets. Integration tests
+are skipped when their connection variables are absent.

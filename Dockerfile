@@ -20,7 +20,9 @@ ENV CGO_ENABLED=0 GOOS=linux
 RUN go build -trimpath -ldflags="-s -w" \
     -o /out/api ./cmd/api \
 && go build -trimpath -ldflags="-s -w" \
-    -o /out/worker ./cmd/worker
+    -o /out/worker ./cmd/worker \
+&& go build -trimpath -ldflags="-s -w" \
+    -o /out/consumer ./cmd/consumer
 
 FROM alpine:3.22 AS app
 
@@ -32,6 +34,7 @@ WORKDIR /app
 
 COPY --from=builder /out/api /app/api
 COPY --from=builder /out/worker /app/worker
+COPY --from=builder /out/consumer /app/consumer
 
 USER relay
 

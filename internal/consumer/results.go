@@ -10,21 +10,21 @@ import (
 
 const MaxDeliveryAttempts = 5
 
-// RecordResult counts a completed attempt and persists either delivery success
-// or a scheduled retry. A database error is returned to the caller for logging;
-// the delivery remains eligible if the update was not committed.
 func RecordResult(ctx context.Context, db *gorm.DB, delivery Delivery, webhookErr error) error {
+	if delivery.ClaimToken == nil {
+		return ErrClaimLost
+	}
 	updates := map[string]any{
-		"attempt_count":   gorm.Expr("attempt_count + 1"),
-		"last_attempt_at": gorm.Expr("CURRENT_TIMESTAMP"),
-		"updated_at":      gorm.Expr("CURRENT_TIMESTAMP"),
+		"updated_at":       gorm.Expr("CURRENT_TIMESTAMP"),
+		"claim_token":      nil,
+		"lease_expires_at": nil,
 	}
 	if webhookErr == nil {
 		updates["status"] = DeliveryStatusDelivered
 		updates["delivered_at"] = gorm.Expr("CURRENT_TIMESTAMP")
 		updates["last_error"] = nil
 	} else {
-		attempt := delivery.AttemptCount + 1
+		attempt := delivery.AttemptCount
 		updates["last_error"] = webhookErr.Error()
 		updates["delivered_at"] = nil
 		if attempt >= MaxDeliveryAttempts {
@@ -37,13 +37,14 @@ func RecordResult(ctx context.Context, db *gorm.DB, delivery Delivery, webhookEr
 		}
 	}
 	result := db.WithContext(ctx).Model(&Delivery{}).
-		Where("id = ? AND status = ? AND attempt_count = ?", delivery.ID, DeliveryStatusPending, delivery.AttemptCount).
+		Where("id = ? AND status = ? AND claim_token = ? AND lease_expires_at > CURRENT_TIMESTAMP",
+			delivery.ID, DeliveryStatusProcessing, *delivery.ClaimToken).
 		Updates(updates)
 	if result.Error != nil {
 		return fmt.Errorf("record webhook result for delivery %d: %w", delivery.ID, result.Error)
 	}
 	if result.RowsAffected != 1 {
-		return fmt.Errorf("delivery %d was not found, changed, or is no longer pending", delivery.ID)
+		return fmt.Errorf("%w: delivery %d", ErrClaimLost, delivery.ID)
 	}
 	return nil
 }

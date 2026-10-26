@@ -5,10 +5,11 @@ import "time"
 type DeliveryStatus string
 
 const (
-	DeliveryStatusUnknown   DeliveryStatus = ""
-	DeliveryStatusPending   DeliveryStatus = "pending"
-	DeliveryStatusDelivered DeliveryStatus = "delivered"
-	DeliveryStatusFailed    DeliveryStatus = "failed"
+	DeliveryStatusUnknown    DeliveryStatus = ""
+	DeliveryStatusPending    DeliveryStatus = "pending"
+	DeliveryStatusProcessing DeliveryStatus = "processing"
+	DeliveryStatusDelivered  DeliveryStatus = "delivered"
+	DeliveryStatusFailed     DeliveryStatus = "failed"
 )
 
 type Delivery struct {
@@ -26,4 +27,6 @@ type Delivery struct {
 	CreatedAt      time.Time `gorm:"default:CURRENT_TIMESTAMP"`
 	UpdatedAt      time.Time `gorm:"default:CURRENT_TIMESTAMP"`
 	NextAttemptAt  time.Time `gorm:"default:CURRENT_TIMESTAMP"`
+	ClaimToken     *string
+	LeaseExpiresAt *time.Time
 }
