@@ -1,8 +1,11 @@
 package test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -61,14 +64,24 @@ func TestKafkaConsumerGroupEndToEnd(t *testing.T) {
 		t.Skip("set TEST_KAFKA_ADDR to an isolated Kafka broker with relay.events created")
 	}
 	s := testService(t)
+	snapshot := seedRecord(t, s, "ride.completed")
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil || string(body) != snapshot.Payload || r.Header.Get("X-Relay-Event-Type") != snapshot.Type {
+			t.Errorf("webhook did not use the Kafka snapshot: body=%s, type=%q, err=%v", body, r.Header.Get("X-Relay-Event-Type"), err)
+		}
 		calls.Add(1)
 		w.WriteHeader(204)
 	}))
 	t.Cleanup(server.Close)
-	id := seedRecord(t, s, "ride.completed")
 	seedTarget(t, s, "ride.completed", server.URL, true)
+	// Change the stored row after taking the publisher's snapshot. Both routing
+	// and payload must still come from Kafka, not from a subsequent DB lookup.
+	if err := s.db.Exec(`UPDATE outbox_record_models SET type = 'database.changed',
+		payload = '{"source":"database"}' WHERE id = ?`, snapshot.ID).Error; err != nil {
+		t.Fatal(err)
+	}
 	// A sequence survives transaction rollback, letting the test observe that
 	// the consumer actually tried fanout before checking its committed offset.
 	if err := s.db.Exec(`CREATE SEQUENCE fanout_attempts;
@@ -92,11 +105,30 @@ func TestKafkaConsumerGroupEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(producer.Close)
-	value := []byte(fmt.Sprintf(`{"ID":%d}`, id))
+	encode := func(value any) []byte {
+		t.Helper()
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	value := encode(snapshot)
+	invalidID := snapshot
+	invalidID.ID = 0
+	rejected := []struct {
+		value  []byte
+		reason string
+	}{
+		{[]byte("{invalid"), "invalid character"},
+		{encode(invalidID), "positive outbox ID"},
+	}
 	records := []*kgo.Record{
 		{Topic: "relay.events", Partition: 0, Value: value},
 		{Topic: "relay.events", Partition: 0, Value: value},
-		{Topic: "relay.events", Partition: 0, Value: []byte("{invalid")},
+	}
+	for _, rejection := range rejected {
+		records = append(records, &kgo.Record{Topic: "relay.events", Partition: 0, Value: rejection.value})
 	}
 	if err := producer.ProduceSync(ctx, records...).FirstErr(); err != nil {
 		t.Fatal(err)
@@ -121,17 +153,30 @@ func TestKafkaConsumerGroupEndToEnd(t *testing.T) {
 	}
 	eventually(t, 15*time.Second, func() bool {
 		var job consumer.Delivery
-		return s.db.Where("record_id = ?", id).First(&job).Error == nil && job.Status == consumer.DeliveryStatusDelivered
+		return s.db.Where("record_id = ?", snapshot.ID).First(&job).Error == nil && job.Status == consumer.DeliveryStatusDelivered
 	})
 	eventually(t, 10*time.Second, func() bool {
 		offset, err := committedOffset(ctx, producer, cfg.Group, 0)
-		return err == nil && offset == records[2].Offset+1
+		return err == nil && offset == records[len(records)-1].Offset+1
 	})
-	if err := s.db.Model(&consumer.Delivery{}).Where("record_id = ?", id).Count(&count).Error; err != nil || count != 1 {
+	if err := s.db.Model(&consumer.Delivery{}).Where("record_id = ?", snapshot.ID).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("duplicate event created duplicate jobs: %d, %v", count, err)
 	}
-	if err := s.db.Table("consumer_rejections").Count(&count).Error; err != nil || count != 1 {
-		t.Fatalf("invalid message was not retained before commit: %d, %v", count, err)
+	if err := s.db.Table("consumer_rejections").Count(&count).Error; err != nil || count != int64(len(rejected)) {
+		t.Fatalf("invalid messages were not retained before commit: %d, %v", count, err)
+	}
+	for i, rejection := range rejected {
+		var stored struct {
+			RecordValue []byte
+			LastError   string
+		}
+		if err := s.db.Table("consumer_rejections").Where("topic = ? AND partition = ? AND record_offset = ?",
+			"relay.events", 0, records[i+2].Offset).Take(&stored).Error; err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(stored.RecordValue, rejection.value) || !strings.Contains(stored.LastError, rejection.reason) {
+			t.Fatalf("incorrect rejection for record %d: %+v", i, stored)
+		}
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("multiple consumers sent %d copies of one delivery", calls.Load())

@@ -137,8 +137,8 @@ sequenceDiagram
     Kafka-->>Outbox: Publish acknowledged
     Outbox->>DB: Mark outbox published
 
-    Kafka-->>Fanout: Fetch record
-    Fanout->>DB: Load source outbox row
+    Kafka-->>Fanout: Fetch full outbox snapshot
+    Fanout->>Fanout: Decode outbox model
     Fanout->>DB: Transaction: insert fanout receipt and matching deliveries
     DB-->>Fanout: Durable delivery jobs
     Fanout->>Kafka: Commit processed offset
@@ -161,9 +161,11 @@ jobs; database polling delivers them. A slow or failing webhook does not hold
 its Kafka offset open, and already-created jobs continue retrying while Kafka
 is idle or unavailable.
 
-The dispatcher currently sends the full outbox model as JSON. The consumer
-reads its `ID` and reloads the durable source row before fanout. That database
-lookup is part of the current implementation.
+The dispatcher sends the full outbox model as JSON. The consumer decodes it
+into `ingestion.OutboxRecordModel` and uses its `ID`, `Type`, and `Payload`
+directly for fanout, without fetching the outbox row again. PostgreSQL still
+matches active subscriptions and atomically persists the fanout receipt and
+delivery jobs. The existing dispatcher already publishes the complete model.
 
 ## Quick start
 
@@ -557,9 +559,9 @@ or offset commits fail.
 A `consumer_fanouts` receipt freezes the first successful fanout, even if there
 were no active subscriptions. Adding subscribers later does not deliver that old
 event retroactively. `(record_id, subscription_id)` is also unique in deliveries.
-Malformed Kafka JSON, invalid IDs, and missing source records are retained in
-`consumer_rejections` before their offsets are acknowledged. A database failure
-while storing the rejection leaves the message unacknowledged for retry.
+Malformed Kafka JSON and invalid IDs are retained in `consumer_rejections`
+before their offsets are acknowledged. Database failures during fanout or while
+storing a rejection leave the message unacknowledged for retry.
 
 ### Delivery state machine
 
@@ -1020,10 +1022,14 @@ broker seeds.
 The integration suite covers atomic fanout and rollback, duplicate suppression,
 frozen subscriber selection including zero matches, concurrent delivery claims,
 expired leases, stale owners, attempt exhaustion, retry scheduling independent
-of Kafka, and migration 5 rollback/reapplication. The Kafka test runs two
-consumers, injects a database failure, verifies that offsets do not advance
-before persistence, and checks recovery, delivery, and rejected-message
-retention.
+of Kafka, and migration 5 rollback/reapplication. A fanout test makes explicit
+outbox reads fail and verifies that routing and payload come from the supplied
+snapshot.
+The Kafka test publishes full outbox models to two consumers, changes the stored
+row to verify that Kafka supplies the delivery content, injects a database
+failure, and verifies that offsets do not advance before persistence. It also
+checks recovery, duplicate suppression, and retention of malformed messages and
+invalid IDs before their offsets are committed.
 
 ## Implementation status
 

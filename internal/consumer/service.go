@@ -14,7 +14,6 @@ import (
 	"gorm.io/gorm"
 )
 
-var ErrUnknownRecord = errors.New("outbox record does not exist")
 var ErrClaimLost = errors.New("delivery claim expired or was replaced")
 
 type Service struct{ db *gorm.DB }
@@ -45,16 +44,9 @@ func (s *Service) Close() error {
 	return pool.Close()
 }
 
-func (s *Service) Fanout(ctx context.Context, recordID int64) error {
+func (s *Service) Fanout(ctx context.Context, record ingestion.OutboxRecordModel) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var record ingestion.OutboxRecordModel
-		if err := tx.First(&record, recordID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("%w: %d", ErrUnknownRecord, recordID)
-			}
-			return err
-		}
-		receipt := tx.Exec("INSERT INTO consumer_fanouts(record_id) VALUES (?) ON CONFLICT DO NOTHING", recordID)
+		receipt := tx.Exec("INSERT INTO consumer_fanouts(record_id) VALUES (?) ON CONFLICT DO NOTHING", record.ID)
 		if receipt.Error != nil {
 			return receipt.Error
 		}

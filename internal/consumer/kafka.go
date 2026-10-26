@@ -3,10 +3,11 @@ package consumer
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"time"
+
+	"relay/internal/ingestion"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -70,19 +71,16 @@ func (s *Service) consumeSession(ctx context.Context, cfg Config) error {
 }
 
 func (s *Service) handleRecord(ctx context.Context, record *kgo.Record) error {
-	var event struct{ ID int64 }
+	var event ingestion.OutboxRecordModel
 	err := json.Unmarshal(record.Value, &event)
 	if err == nil && event.ID <= 0 {
 		err = fmt.Errorf("Kafka record must contain a positive outbox ID")
 	}
 	if err == nil {
-		err = s.Fanout(ctx, event.ID)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, ErrUnknownRecord) {
+		if err := s.Fanout(ctx, event); err != nil {
 			return fmt.Errorf("fanout outbox %d: %w", event.ID, err)
 		}
+		return nil
 	}
 	// Retain poison messages before acknowledging them, so they cannot stall a
 	// partition forever or disappear without an inspectable database record.

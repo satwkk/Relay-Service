@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"relay/internal/consumer"
+	"relay/internal/ingestion"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -91,15 +92,15 @@ func testService(t *testing.T) *testFixture {
 	return &testFixture{Service: service, db: db}
 }
 
-func seedRecord(t *testing.T, s *testFixture, eventType string) int64 {
+func seedRecord(t *testing.T, s *testFixture, eventType string) ingestion.OutboxRecordModel {
 	t.Helper()
-	var id int64
+	var record ingestion.OutboxRecordModel
 	err := s.db.Raw(`INSERT INTO outbox_record_models(type, idempotence_key, payload)
-		VALUES (?, 'test', '{"ride_id":"ride_123"}') RETURNING id`, eventType).Row().Scan(&id)
+		VALUES (?, 'test', '{"ride_id":"ride_123"}') RETURNING *`, eventType).Scan(&record).Error
 	if err != nil {
 		t.Fatal(err)
 	}
-	return id
+	return record
 }
 
 func seedTarget(t *testing.T, s *testFixture, eventType, endpoint string, enabled bool) int64 {
@@ -132,7 +133,7 @@ func eventually(t *testing.T, timeout time.Duration, check func() bool) {
 func TestFanoutIsAtomicAndReplaySafe(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
-	id := seedRecord(t, s, "ride.completed")
+	record := seedRecord(t, s, "ride.completed")
 	seedTarget(t, s, "ride.completed", "http://payments/webhook", true)
 	seedTarget(t, s, "ride.completed", "http://notifications/webhook", true)
 	seedTarget(t, s, "ride.completed", "http://disabled/webhook", false)
@@ -144,7 +145,7 @@ func TestFanoutIsAtomicAndReplaySafe(t *testing.T) {
 	errors := make(chan error, 12)
 	for i := 0; i < 12; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); errors <- s.Fanout(ctx, id) }()
+		go func() { defer wg.Done(); errors <- s.Fanout(ctx, record) }()
 	}
 	wg.Wait()
 	close(errors)
@@ -154,15 +155,15 @@ func TestFanoutIsAtomicAndReplaySafe(t *testing.T) {
 		}
 	}
 	var count int64
-	s.db.Model(&consumer.Delivery{}).Where("record_id = ?", id).Count(&count)
+	s.db.Model(&consumer.Delivery{}).Where("record_id = ?", record.ID).Count(&count)
 	if count != 2 {
 		t.Fatalf("expected two active targets, got %d", count)
 	}
 	seedTarget(t, s, "ride.completed", "http://added-later/webhook", true)
-	if err := s.Fanout(ctx, id); err != nil {
+	if err := s.Fanout(ctx, record); err != nil {
 		t.Fatal(err)
 	}
-	s.db.Model(&consumer.Delivery{}).Where("record_id = ?", id).Count(&count)
+	s.db.Model(&consumer.Delivery{}).Where("record_id = ?", record.ID).Count(&count)
 	if count != 2 {
 		t.Fatal("replay changed an already completed fanout")
 	}
@@ -174,7 +175,7 @@ func TestFanoutIsAtomicAndReplaySafe(t *testing.T) {
 	if err := s.Fanout(ctx, empty); err != nil {
 		t.Fatal(err)
 	}
-	s.db.Model(&consumer.Delivery{}).Where("record_id = ?", empty).Count(&count)
+	s.db.Model(&consumer.Delivery{}).Where("record_id = ?", empty.ID).Count(&count)
 	if count != 0 {
 		t.Fatal("empty fanout was not remembered")
 	}
@@ -187,7 +188,7 @@ func TestFanoutIsAtomicAndReplaySafe(t *testing.T) {
 	if err := s.Fanout(ctx, broken); err == nil {
 		t.Fatal("forced insert failure was ignored")
 	}
-	s.db.Table("consumer_fanouts").Where("record_id = ?", broken).Count(&count)
+	s.db.Table("consumer_fanouts").Where("record_id = ?", broken.ID).Count(&count)
 	if count != 0 {
 		t.Fatal("fanout receipt survived a rolled-back delivery insert")
 	}
@@ -199,14 +200,47 @@ func TestFanoutIsAtomicAndReplaySafe(t *testing.T) {
 	}
 }
 
+func TestFanoutUsesSnapshotWithoutReload(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	record := seedRecord(t, s, "database.original")
+	record.Type = "ride.completed"
+	record.Payload = `{"ride_id":"from_kafka"}`
+	targetID := seedTarget(t, s, record.Type, "http://payments/webhook", true)
+	seedTarget(t, s, "database.original", "http://wrong-target/webhook", true)
+
+	// Foreign keys keep referencing the renamed table. Any application SELECT
+	// against the old name now fails, so fanout must use the supplied snapshot.
+	if err := s.db.Exec(`ALTER TABLE outbox_record_models RENAME TO stored_outbox_records;
+		CREATE FUNCTION fail_outbox_read() RETURNS bigint LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'unexpected outbox SELECT'; END $$;
+		CREATE VIEW outbox_record_models AS SELECT fail_outbox_read() AS id;`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Exec("SELECT * FROM outbox_record_models").Error; err == nil || !strings.Contains(err.Error(), "unexpected outbox SELECT") {
+		t.Fatalf("outbox read guard is not active: %v", err)
+	}
+	if err := s.Fanout(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	var jobs []consumer.Delivery
+	if err := s.db.Where("record_id = ?", record.ID).Find(&jobs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].SubscriptionID != targetID ||
+		jobs[0].EventType != record.Type || jobs[0].Payload != record.Payload {
+		t.Fatalf("fanout did not use the supplied snapshot: %+v", jobs)
+	}
+}
+
 func TestConcurrentClaimsAndLeaseRecovery(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
-	id := seedRecord(t, s, "ride.completed")
+	record := seedRecord(t, s, "ride.completed")
 	for i := 0; i < 20; i++ {
 		seedTarget(t, s, "ride.completed", "http://payments/webhook", true)
 	}
-	if err := s.Fanout(ctx, id); err != nil {
+	if err := s.Fanout(ctx, record); err != nil {
 		t.Fatal(err)
 	}
 	claims := make(chan *consumer.Delivery, 20)
@@ -308,9 +342,9 @@ func TestDeliveryRetriesWithoutKafka(t *testing.T) {
 		w.WriteHeader(204)
 	}))
 	t.Cleanup(server.Close)
-	id := seedRecord(t, s, "ride.completed")
+	record := seedRecord(t, s, "ride.completed")
 	seedTarget(t, s, "ride.completed", server.URL, true)
-	if err := s.Fanout(context.Background(), id); err != nil {
+	if err := s.Fanout(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -323,14 +357,14 @@ func TestDeliveryRetriesWithoutKafka(t *testing.T) {
 	t.Cleanup(func() { cancel(); wg.Wait() })
 	eventually(t, 3*time.Second, func() bool {
 		var job consumer.Delivery
-		return s.db.Where("record_id = ?", id).First(&job).Error == nil && job.Status == consumer.DeliveryStatusPending && job.AttemptCount == 1 && job.LastError != nil && strings.Contains(*job.LastError, "503")
+		return s.db.Where("record_id = ?", record.ID).First(&job).Error == nil && job.Status == consumer.DeliveryStatusPending && job.AttemptCount == 1 && job.LastError != nil && strings.Contains(*job.LastError, "503")
 	})
-	if err := s.db.Exec("UPDATE deliveries SET next_attempt_at = now() WHERE record_id = ?", id).Error; err != nil {
+	if err := s.db.Exec("UPDATE deliveries SET next_attempt_at = now() WHERE record_id = ?", record.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, 3*time.Second, func() bool {
 		var job consumer.Delivery
-		return s.db.Where("record_id = ?", id).First(&job).Error == nil && job.Status == consumer.DeliveryStatusDelivered && job.AttemptCount == 2 && job.LastError == nil && job.DeliveredAt != nil
+		return s.db.Where("record_id = ?", record.ID).First(&job).Error == nil && job.Status == consumer.DeliveryStatusDelivered && job.AttemptCount == 2 && job.LastError == nil && job.DeliveredAt != nil
 	})
 	if calls.Load() != 2 {
 		t.Fatalf("expected one failure and one success, got %d requests", calls.Load())
